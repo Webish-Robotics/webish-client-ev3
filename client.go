@@ -6,7 +6,7 @@ import (
 	"bytes"
 	"io/ioutil"
 	"os/exec"
-	"fmt"
+	"encoding/json"
 
 	socket "github.com/graarh/golang-socketio"
 	"github.com/graarh/golang-socketio/transport"
@@ -14,31 +14,26 @@ import (
 
 type Architecture struct {
 	Code string `json:"code"`
-	User int `json:"user"`
+	User string `json:"user"`
 	Room string `json:"room"`
 }
 
-type Serve struct {
-	Code string `json:"code"`
-	User int `json:"user"`
-	SocketUser *socket.Channel `json:"socketuser"`
-}
-
-type Robot struct {
-	Process int `json:"process"`
-	Result string `json:"result"`
-	ResultID int `json:"resultid"`
-	Client *socket.Channel `json:"user"`
+type Feedback struct {
+	Message string `json:"message"`
+	Username string `json:"username"`
+	Room string `json:"room"`
+	Code int `json:"code"`
 }
 
 const found string = "found"
 const occupied string = "occupied"
 
+var process int = 0
+var clientHandler *socket.Client
+
 const exit_signal int = 1
 const signal_killed int = 2
 const success_code int = 0
-
-var framework Robot = Robot{0, "", 0, nil}
 
 func writeScript(code string) {
 	octets := []byte(code)
@@ -49,8 +44,8 @@ func writeScript(code string) {
 	}
 }
 
-func launchScript(code string) string {
-	writeScript(code)
+func launchScript(arch Architecture) {
+	writeScript(arch.Code)
 	cmd := exec.Command("python3", "./app.py")
 
 	var stdout, stderr bytes.Buffer
@@ -58,39 +53,43 @@ func launchScript(code string) string {
 	cmd.Stdout = &stdout
 
 	err := cmd.Start()
-	framework.Process = cmd.Process.Pid
+	process = cmd.Process.Pid
 
 	err = cmd.Wait()
+	code := success_code
+
 	if err != nil {
 		if err.Error() == "exit status 1" {
-			framework.ResultID = exit_signal
+			code = exit_signal
 		}
 		if err.Error() == "signal: killed" {
-			framework.ResultID = signal_killed
+			code = signal_killed
 		}
 		errStr := string(stderr.Bytes())
-		framework.Result = errStr
+
+		bErr, _ := json.Marshal(Feedback{errStr, arch.User, arch.Room + "STUDENT", code})
+		clientHandler.Emit("/feedback", string(bErr))
 	} else {
 		outStr := string(stdout.Bytes())
-		framework.ResultID = success_code
-		framework.Result = outStr
+		oErr, _ := json.Marshal(Feedback{outStr, arch.User, arch.Room + "STUDENT", code})
+		clientHandler.Emit("/feedback", string(oErr))
 	}
-	return framework.Result
+	process = 0
 }
 
 func resetRobot() {
-	cmd := exec.Command("bash", "/client/reset.sh")
+	cmd := exec.Command("bash", "reset.sh")
 	err := cmd.Run()
 
 	if err != nil {
-		fmt.Println(" => ERROR with client at /client/reset.sh:", err)
+		log.Println(" => ERROR with client at reset.sh:", err)
 	}
 }
 
 func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
+	c, err := socket.Dial(socket.GetUrl("169.254.231.62", 8080, false), transport.GetDefaultWebsocketTransport())
 
-	c, err := socket.Dial(socket.GetUrl("169.254.247.202", 8080, false), transport.GetDefaultWebsocketTransport())
 	if err != nil {
 		log.Fatal(err)
 		c.Close()
@@ -106,24 +105,29 @@ func main() {
 
 	err = c.On(socket.OnConnection, func(conn *socket.Channel) {
 		log.Println("OnConnection callback was reached.")
-		c.Emit("/joinable", "demo")
+		room, err := ioutil.ReadFile("room.txt")
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		c.Emit("/joinable", string(room))
 	})
 	if err != nil {
 		log.Fatal(err)
 		c.Close()
 	}
 
+	clientHandler = c
 	for {
 		err = c.On("/check", func(conn *socket.Channel, args interface{}) string {
 			ret := found
-			if framework.Process != 0 {
+			if process != 0 {
 				ret = occupied
 			}
 			return ret
 		})
-		err = c.On("/serve", func(conn *socket.Channel, arch Serve) string {
-			result := launchScript(arch.Code)
-			return result
+		err = c.On("/serve", func(conn *socket.Channel, arch Architecture) {
+			go launchScript(arch)
 		})
 
 		if err != nil {
