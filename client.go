@@ -88,7 +88,7 @@ func resetRobot() {
 
 func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
-	c, err := socket.Dial(socket.GetUrl("169.254.231.62", 8080, false), transport.GetDefaultWebsocketTransport())
+	c, err := socket.Dial(socket.GetUrl("169.254.27.203", 8080, false), transport.GetDefaultWebsocketTransport())
 
 	if err != nil {
 		log.Fatal(err)
